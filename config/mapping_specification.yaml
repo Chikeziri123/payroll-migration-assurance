@@ -1,0 +1,1020 @@
+# =====================================================================
+# FIELD-LEVEL MAPPING SPECIFICATION
+# UK Payroll Migration Assurance Framework
+# =====================================================================
+# Source systems : HR.net (HR master), MiraclePay (payroll)
+# Target system  : SAP HCM (PA infotypes)
+#
+# This file is the single source of truth for how legacy fields map to
+# SAP structures. The transformation code reads it; it is not
+# documentation that describes the code, it is configuration the code
+# obeys. Changing a mapping is a change here, not a change to Python.
+#
+# Every mapping carries four things:
+#   source      where the value comes from
+#   target      where it goes
+#   transform   what is done to it
+#   validation  what must be true for it to be accepted
+#
+# Anything that cannot be mapped is recorded under `unmapped` at the
+# foot of each infotype, with a reason. A migration specification that
+# lists only what works is not a specification.
+# =====================================================================
+
+metadata:
+  specification_version: "1.0"
+  author: "Chikeziri Nnodum"
+  status: "DRAFT - awaiting business sign-off"
+  target_system: "SAP HCM"
+  source_systems:
+    - name: "HR.net"
+      description: "HR master data. Current state only, no change history."
+      primary_key: "emp_id"
+    - name: "MiraclePay"
+      description: "Payroll. Current state plus monthly payment history."
+      primary_key: "payroll_ref"
+  infotypes_in_scope:
+    - PA0000
+    - PA0001
+    - PA0002
+    - PA0006
+    - PA0008
+    - PA0009
+  infotypes_out_of_scope:
+    - infotype: PA0007
+      name: "Planned Working Time"
+      reason: "Time management is a phase two workstream. Working hours are carried on PA0008 for payroll purposes."
+    - infotype: PA0014
+      name: "Recurring Payments and Deductions"
+      reason: "Allowances and deductions are being reviewed by Reward before migration. Values not yet agreed."
+    - infotype: PA0021
+      name: "Family Members and Dependants"
+      reason: "Not required for payroll go-live. Benefits administration remains in the legacy system until phase two."
+    - infotype: PA2001
+      name: "Absences"
+      reason: "Absence history is not migrated. Opening balances only, handled outside this migration."
+
+
+# =====================================================================
+# KEY MATCHING
+# =====================================================================
+# The two source systems share no common key. HR.net uses emp_id,
+# MiraclePay uses payroll_ref. The only field present in both is the
+# National Insurance number, so that is the join.
+#
+# This is the single largest risk in the migration. NI numbers are
+# entered by hand, formatted inconsistently, and occasionally wrong.
+# An unmatched employee is either a person who will not be paid or a
+# duplicate record in the target.
+# =====================================================================
+
+key_matching:
+  join_field: "ni_number"
+  match_strategy:
+    - level: 1
+      method: "EXACT"
+      description: "Normalised NI number matches exactly."
+      normalisation: "Uppercase, strip all whitespace and punctuation."
+      confidence: "EXACT"
+
+    - level: 2
+      method: "FUZZY_NAME_DOB"
+      description: >
+        Where NI numbers do not match, attempt a match on surname plus
+        date of birth. Used to catch transcription errors in NI numbers.
+      criteria:
+        - "Surname matches after case folding and whitespace strip"
+        - "Date of birth matches exactly"
+      confidence: "FUZZY"
+      requires_manual_review: true
+
+    - level: 3
+      method: "UNMATCHED"
+      description: >
+        Present in one system only. Routed to the exception report for
+        business decision. An HR-only record may be a non-paid worker;
+        a payroll-only record may be a leaver not yet closed in HR.
+      confidence: "UNMATCHED"
+      requires_manual_review: true
+
+  pernr_generation:
+    description: >
+      SAP personnel numbers are assigned sequentially by the migration,
+      not carried from either legacy system. Both legacy keys are
+      retained in sap_target.key_map so every target record traces back
+      to its sources.
+    start_value: 10000001
+    format: "8 digit zero-padded"
+
+
+# =====================================================================
+# PA0000 : ACTIONS
+# =====================================================================
+# The employment lifecycle. Derived rather than copied: neither source
+# holds action records, so they are constructed from employment dates.
+# =====================================================================
+
+PA0000:
+  description: "Employment lifecycle actions"
+  record_construction: "DERIVED"
+  construction_rule: >
+    One hire action at hire date. If a leaver date exists, one leaver
+    action at that date. Promotions are not derivable because neither
+    source holds reliable promotion dates for all employees.
+
+  fields:
+    - target: pernr
+      source: "GENERATED"
+      transform: "Assigned by key matching, see key_matching.pernr_generation"
+      validation: "8 digits, not null, unique in key_map"
+
+    - target: begda
+      source: "hrnet_employee.hire_date"
+      transform: "parse_uk_date"
+      validation: "Valid date, not before 1970-01-01, not after extract date"
+      notes: "Where hire_date is unparseable, fall back to miraclepay_employee.start_date"
+
+    - target: endda
+      source: "hrnet_employee.leaver_date"
+      transform: >
+        If leaver_date present and parseable, the day before the leaver
+        action begins. Otherwise SAP high date 9999-12-31.
+      validation: "Valid date, greater than or equal to begda"
+
+    - target: massn
+      source: "DERIVED"
+      transform: "Hire action = '01'. Leaver action = '10'."
+      validation: "Must exist in value_mappings.action_type"
+
+    - target: massg
+      source: "hrnet_employee.leaver_reason"
+      transform: "map_value: leaver_reason"
+      validation: "Must exist in value_mappings.leaver_reason, or null"
+
+    - target: stat2
+      source: "hrnet_employee.employment_status"
+      transform: "map_value: employment_status"
+      validation: "Must be one of 0, 1, 3"
+
+  unmapped:
+    - field: "Promotion and transfer actions"
+      reason: >
+        HR.net holds a single last_promotion_date but not the nature of
+        the change or its effect on pay. Constructing promotion actions
+        from this would create records with no supporting detail.
+        Agreed with the business that only hire and leaver actions
+        migrate.
+
+
+# =====================================================================
+# PA0001 : ORGANISATIONAL ASSIGNMENT
+# =====================================================================
+# KNOWN LIMITATION, requires business acceptance:
+# Neither source system holds organisational history. Only current
+# state is available. Each employee therefore receives a single record
+# valid from hire date to high date. Historical cost centre, position
+# and reporting line are NOT MIGRATABLE from the available sources.
+#
+# Consequence: any historical payroll cost analysis in SAP will
+# attribute all past cost to the employee's current cost centre. This
+# has been raised as an open issue.
+# =====================================================================
+
+PA0001:
+  description: "Organisational assignment"
+  record_construction: "SINGLE_RECORD_FULL_VALIDITY"
+  construction_rule: >
+    One record per employee, begda = hire date, endda = high date or
+    day before leaving. No historical periods, see limitation above.
+
+  fields:
+    - target: pernr
+      source: "GENERATED"
+      transform: "From key_map"
+      validation: "Must exist in key_map"
+
+    - target: begda
+      source: "PA0000.begda"
+      transform: "Inherit hire date from the hire action"
+      validation: "Valid date, matches PA0000 hire action begda"
+
+    - target: endda
+      source: "PA0000.endda"
+      transform: "Inherit from the corresponding action"
+      validation: "Valid date, greater than or equal to begda"
+
+    - target: bukrs
+      source: "CONSTANT"
+      transform: "Single company code for this migration: '1000'"
+      validation: "Must be '1000'"
+      notes: "Multi-company structures are out of scope."
+
+    - target: werks
+      source: "hrnet_employee.location"
+      transform: "map_value: location_to_personnel_area"
+      validation: "Must exist in value_mappings.location_to_personnel_area"
+      notes: "Unmapped locations default to '9999' and raise a MEDIUM defect."
+
+    - target: persg
+      source: "hrnet_employee.contract_type"
+      transform: "map_value: contract_to_employee_group"
+      validation: "Must be one of 1, 2, 9"
+
+    - target: persk
+      source: "hrnet_employee.contract_type"
+      transform: "map_value: contract_to_employee_subgroup"
+      validation: "Must exist in value_mappings.contract_to_employee_subgroup"
+
+    - target: kostl
+      source: "SURVIVORSHIP"
+      transform: "See survivorship_rules.cost_centre"
+      validation: "10 characters, exists in reference data, or null with HIGH defect"
+      notes: >
+        This is the most frequently conflicting field between the two
+        sources. Every conflict is logged to migration_audit.
+
+    - target: orgeh
+      source: "hrnet_employee.department"
+      transform: "map_value: department_to_org_unit"
+      validation: "8 characters, must exist in value_mappings.department_to_org_unit"
+
+    - target: plans
+      source: "NOT_MIGRATED"
+      transform: "Default to '99999999' (default position)"
+      validation: "None"
+      notes: >
+        Position management is not implemented in the legacy systems.
+        Positions will be created in SAP as a separate exercise.
+
+    - target: stell
+      source: "hrnet_employee.job_title"
+      transform: "map_value: job_title_to_job_key"
+      validation: "Must exist in value_mappings.job_title_to_job_key"
+
+  unmapped:
+    - field: "manager_emp_id"
+      reason: >
+        Reporting lines are represented in SAP through org unit and
+        position relationships, not as a field on PA0001. Since
+        positions are not being migrated, the manager relationship
+        cannot be represented. Raised as an open issue.
+
+
+# =====================================================================
+# PA0002 : PERSONAL DATA
+# =====================================================================
+
+PA0002:
+  description: "Personal data and identity"
+  record_construction: "SINGLE_RECORD_FULL_VALIDITY"
+  construction_rule: >
+    One record per employee. Name change history is not available in
+    either source, so a single record spans full employment.
+
+  fields:
+    - target: pernr
+      source: "GENERATED"
+      transform: "From key_map"
+      validation: "Must exist in key_map"
+
+    - target: begda
+      source: "PA0000.begda"
+      transform: "Inherit hire date"
+      validation: "Valid date"
+
+    - target: endda
+      source: "PA0000.endda"
+      transform: "Inherit"
+      validation: "Greater than or equal to begda"
+
+    - target: nachn
+      source: "SURVIVORSHIP"
+      transform: "See survivorship_rules.surname"
+      validation: "Not null, maximum 40 characters, letters, hyphen, apostrophe and space only"
+
+    - target: vorna
+      source: "SURVIVORSHIP"
+      transform: "See survivorship_rules.forename"
+      validation: "Not null, maximum 40 characters"
+
+    - target: midnm
+      source: "hrnet_employee.middle_name"
+      transform: "trim, title case"
+      validation: "Maximum 40 characters, may be null"
+
+    - target: rufnm
+      source: "hrnet_employee.known_as"
+      transform: "trim, title case"
+      validation: "Maximum 40 characters, may be null"
+
+    - target: anred
+      source: "hrnet_employee.title"
+      transform: "map_value: title_to_form_of_address"
+      validation: "Must exist in value_mappings.title_to_form_of_address, or null"
+
+    - target: gbdat
+      source: "SURVIVORSHIP"
+      transform: "See survivorship_rules.date_of_birth"
+      validation: >
+        Valid date, after 1920-01-01, before extract date, and implying
+        an age between 16 and 75 at hire date.
+
+    - target: gesch
+      source: "hrnet_employee.gender"
+      transform: "map_value: gender"
+      validation: "Must be 1, 2 or 3"
+      notes: >
+        Source uses inconsistent coding: M, F, Male, Female, m, f and
+        blank all appear. Blank maps to 3 (not specified) rather than
+        being rejected.
+
+    - target: famst
+      source: "hrnet_employee.marital_status"
+      transform: "map_value: marital_status"
+      validation: "Must exist in value_mappings.marital_status, or null"
+
+    - target: natio
+      source: "hrnet_employee.nationality"
+      transform: "map_value: nationality_to_iso"
+      validation: "3 character ISO country code, or null"
+
+    - target: perid
+      source: "key_map.ni_number"
+      transform: "normalise_ni_number"
+      validation: >
+        Matches ^[A-CEGHJ-PR-TW-Z]{2}[0-9]{6}[A-D]$ after normalisation.
+        Failures are CRITICAL: an invalid NI number blocks HMRC
+        submission.
+
+
+# =====================================================================
+# PA0006 : ADDRESSES
+# =====================================================================
+
+PA0006:
+  description: "Employee addresses"
+  record_construction: "ONE_PER_SUBTYPE"
+  construction_rule: >
+    Permanent address (subtype 1) is mandatory. Where multiple HR.net
+    addresses exist for one employee, the one flagged primary wins;
+    where none or several are flagged, the most recently updated wins
+    and a MEDIUM defect is raised.
+
+  fields:
+    - target: pernr
+      source: "GENERATED"
+      transform: "From key_map"
+      validation: "Must exist in key_map"
+
+    - target: subty
+      source: "hrnet_address.address_type"
+      transform: "map_value: address_type_to_subtype"
+      validation: "Must be 1 or 2"
+
+    - target: begda
+      source: "PA0000.begda"
+      transform: "Inherit hire date. Address history is not available."
+      validation: "Valid date"
+
+    - target: endda
+      source: "PA0000.endda"
+      transform: "Inherit"
+      validation: "Greater than or equal to begda"
+
+    - target: stras
+      source: "hrnet_address.address_line_1"
+      transform: "trim, collapse internal whitespace"
+      validation: "Not null, maximum 60 characters"
+
+    - target: locat
+      source: "hrnet_address.address_line_2"
+      transform: "trim"
+      validation: "Maximum 40 characters, may be null"
+
+    - target: ort01
+      source: "hrnet_address.city"
+      transform: "trim, title case"
+      validation: "Not null, maximum 40 characters"
+
+    - target: ort02
+      source: "hrnet_address.county"
+      transform: "trim, title case"
+      validation: "Maximum 40 characters, may be null"
+
+    - target: pstlz
+      source: "hrnet_address.postcode"
+      transform: "normalise_uk_postcode"
+      validation: >
+        Matches UK postcode pattern after normalisation to uppercase
+        with a single space before the inward code. Failures are HIGH:
+        statutory correspondence cannot be issued.
+
+    - target: land1
+      source: "hrnet_address.country"
+      transform: "map_value: country_to_iso"
+      validation: "3 character ISO code, defaults to GB"
+
+
+# =====================================================================
+# PA0008 : BASIC PAY
+# =====================================================================
+# The only infotype with genuine derived history.
+#
+# Neither source holds a salary change log. Periods are inferred from
+# step changes in gross pay across the MiraclePay payment history. The
+# inference rules below are assumptions requiring business acceptance,
+# because an incorrect inference means an incorrect salary history in
+# the target system.
+# =====================================================================
+
+PA0008:
+  description: "Basic pay with derived history"
+  record_construction: "DERIVED_FROM_PAYMENT_HISTORY"
+
+  derivation_rules:
+    - rule_id: "PAY-01"
+      name: "Period detection"
+      description: >
+        Order payment history by pay period. A new PA0008 record begins
+        where annualised basic pay differs from the preceding period by
+        more than the tolerance.
+      tolerance_pct: 0.5
+      rationale: >
+        A 0.5% tolerance absorbs rounding differences in monthly
+        division without masking genuine pay awards, which are
+        rarely below 1%.
+
+    - rule_id: "PAY-02"
+      name: "Bonus exclusion"
+      description: >
+        Only the basic_pay column is used for period detection. Bonus
+        and overtime are excluded, since they vary month to month
+        without any change to the underlying salary.
+      rationale: >
+        Including variable pay would create a new salary record almost
+        every month, producing thousands of spurious periods.
+
+    - rule_id: "PAY-03"
+      name: "Partial period handling"
+      description: >
+        Where a period's basic pay is between 10% and 90% of both the
+        preceding and following periods, it is treated as a mid-month
+        change rather than a distinct salary. The record is not created
+        and the change is dated to the first day of that month.
+      rationale: >
+        A salary change on the 15th produces a blended month that is
+        neither the old nor the new rate. Treating it as a third salary
+        would be wrong.
+      limitation: >
+        This rule cannot distinguish a mid-month pay change from
+        genuine unpaid leave. Both produce the same signal. Affected
+        records are flagged for manual review.
+
+    - rule_id: "PAY-04"
+      name: "Zero and negative pay"
+      description: >
+        Periods with zero or negative basic pay are excluded from
+        period detection and do not terminate the preceding record.
+      rationale: >
+        Zero pay indicates unpaid leave, a payroll correction, or a
+        maternity period. None of these represent a salary change.
+
+    - rule_id: "PAY-05"
+      name: "Gap closure"
+      description: >
+        Derived periods are closed so that each record's endda is the
+        day before the next record's begda. The final record carries
+        the SAP high date, or the day before leaving.
+      rationale: >
+        SAP requires continuous tiling. Any gap would leave the
+        employee with no salary for that period.
+
+  fields:
+    - target: pernr
+      source: "GENERATED"
+      transform: "From key_map"
+      validation: "Must exist in key_map"
+
+    - target: begda
+      source: "DERIVED"
+      transform: "First day of the period in which the pay change is detected"
+      validation: "Valid date, not before PA0000 hire date"
+
+    - target: endda
+      source: "DERIVED"
+      transform: "See derivation rule PAY-05"
+      validation: "Greater than or equal to begda, tiles with adjacent records"
+
+    - target: ansal
+      source: "DERIVED"
+      transform: "Annualised basic pay for the period, rounded to 2 decimal places"
+      validation: "Greater than zero, and at or above National Minimum Wage for the period at stated FTE"
+      notes: >
+        NMW validation is advisory rather than blocking, because
+        historical rates vary and apprentice rates differ.
+
+    - target: waers
+      source: "CONSTANT"
+      transform: "GBP"
+      validation: "Must be GBP"
+
+    - target: bsgrd
+      source: "hrnet_employee.fte"
+      transform: "normalise_fte"
+      validation: "Greater than 0 and at most 100"
+      notes: >
+        Source stores FTE inconsistently as 1, 1.0, 0.5, 100%, 50%.
+        All are normalised to a percentage.
+
+    - target: trfar
+      source: "miraclepay_employee.pay_scale"
+      transform: "map_value: pay_scale_to_type"
+      validation: "Must exist in value_mappings.pay_scale_to_type, or null"
+
+    - target: trfgr
+      source: "miraclepay_employee.pay_scale"
+      transform: "map_value: pay_scale_to_group"
+      validation: "Must exist in value_mappings.pay_scale_to_group, or null"
+
+  unmapped:
+    - field: "Salary history before the payment history window"
+      reason: >
+        Payment history covers a fixed window. For employees hired
+        before it begins, the earliest derived record is back-dated to
+        the hire date at the earliest observed salary. This
+        understates historical pay for long-serving employees and is a
+        stated assumption.
+
+
+# =====================================================================
+# PA0009 : BANK DETAILS
+# =====================================================================
+# The most operationally critical infotype. An error here means an
+# employee is not paid. All validation failures are CRITICAL.
+# =====================================================================
+
+PA0009:
+  description: "Bank details for payment"
+  record_construction: "SINGLE_RECORD_FULL_VALIDITY"
+  construction_rule: >
+    One active bank record per employee. Where multiple active records
+    exist in MiraclePay, all are rejected pending manual resolution:
+    guessing which account to pay is not acceptable.
+
+  fields:
+    - target: pernr
+      source: "GENERATED"
+      transform: "From key_map"
+      validation: "Must exist in key_map"
+
+    - target: subty
+      source: "CONSTANT"
+      transform: "'0' for main bank details"
+      validation: "Must be '0'"
+
+    - target: begda
+      source: "PA0000.begda"
+      transform: "Inherit hire date"
+      validation: "Valid date"
+
+    - target: endda
+      source: "PA0000.endda"
+      transform: "Inherit"
+      validation: "Greater than or equal to begda"
+
+    - target: emftx
+      source: "miraclepay_bank.account_holder"
+      transform: "trim, upper case"
+      validation: "Not null, maximum 40 characters"
+      notes: >
+        Where the account holder name does not match the employee name,
+        a MEDIUM defect is raised. Third party accounts exist
+        legitimately but should be confirmed.
+
+    - target: bankl
+      source: "miraclepay_bank.sort_code"
+      transform: "normalise_sort_code"
+      validation: "Exactly 6 digits after stripping hyphens and spaces. CRITICAL on failure."
+
+    - target: bankn
+      source: "miraclepay_bank.account_number"
+      transform: "normalise_account_number"
+      validation: >
+        Exactly 8 digits. Numbers of 6 or 7 digits are left-padded with
+        zeros, since leading zeros are commonly lost in spreadsheet
+        based extracts. Anything else is CRITICAL.
+
+    - target: zlsch
+      source: "miraclepay_employee.payment_method"
+      transform: "map_value: payment_method"
+      validation: "Must exist in value_mappings.payment_method"
+
+  unmapped:
+    - field: "building_society_ref"
+      reason: >
+        Building society roll numbers are held on PA0009 in field
+        bkref, which is out of scope for this migration. Affected
+        employees are listed in the exception report for manual entry.
+
+
+# =====================================================================
+# SURVIVORSHIP RULES
+# =====================================================================
+# Where both source systems hold a value and they disagree, these rules
+# decide which survives. Every application of a rule is written to
+# sap_target.migration_audit with the before and after values.
+#
+# The precedence logic is not arbitrary: each field is sourced from the
+# system that owns it operationally.
+# =====================================================================
+
+survivorship_rules:
+
+  cost_centre:
+    precedence:
+      - source: "miraclepay_employee.cost_centre"
+        rank: 1
+      - source: "hrnet_employee.cost_centre"
+        rank: 2
+    rationale: >
+      Payroll cost centre determines where salary cost is actually
+      posted to the general ledger. HR's value is used for reporting
+      and is more often stale. Finance is the system of record for
+      where money is charged.
+    on_conflict: "Log to audit, raise MEDIUM defect, payroll value survives"
+
+  surname:
+    precedence:
+      - source: "hrnet_employee.last_name"
+        rank: 1
+      - source: "miraclepay_employee.surname"
+        rank: 2
+    rationale: >
+      HR is the system of record for identity. Payroll surnames are
+      frequently outdated after marriage or deed poll because payroll
+      is updated only when it affects payment.
+    on_conflict: "Log to audit, raise LOW defect, HR value survives"
+
+  forename:
+    precedence:
+      - source: "hrnet_employee.first_name"
+        rank: 1
+      - source: "miraclepay_employee.forename"
+        rank: 2
+    rationale: "As surname. HR owns identity."
+    on_conflict: "Log to audit, raise LOW defect, HR value survives"
+
+  date_of_birth:
+    precedence:
+      - source: "NO_AUTOMATIC_SURVIVORSHIP"
+    rationale: >
+      Date of birth drives NI category, pension auto-enrolment and
+      statutory entitlements. A wrong date has legal and financial
+      consequences. Where the two sources disagree, neither is trusted
+      and the record is routed to manual review.
+    on_conflict: "REJECT with CRITICAL severity, route to exception report"
+
+  employment_dates:
+    precedence:
+      - source: "hrnet_employee.hire_date"
+        rank: 1
+      - source: "miraclepay_employee.start_date"
+        rank: 2
+    rationale: >
+      HR records the contractual start date. Payroll records the first
+      date the employee was paid, which may be later where onboarding
+      spanned a pay cut-off.
+    on_conflict: "Log to audit, raise LOW defect, HR value survives"
+    exception: >
+      Where the HR hire date is later than the earliest payment in the
+      payment history, the payment date wins: the employee was
+      demonstrably employed and paid. Raise MEDIUM defect.
+
+  leaver_status:
+    precedence:
+      - source: "COMBINED"
+    rationale: >
+      An employee marked as a leaver in HR but still being paid is a
+      material control failure, not a data quality issue. So is the
+      reverse.
+    on_conflict: >
+      Where HR shows a leaver date and payroll shows payments after it,
+      raise CRITICAL defect and route to exception report. Do not
+      resolve automatically.
+
+
+# =====================================================================
+# VALUE MAPPINGS
+# =====================================================================
+# Code translation tables. Source values are matched case-insensitively
+# after trimming. Any source value not listed produces a defect at the
+# stated severity rather than silently defaulting.
+# =====================================================================
+
+value_mappings:
+
+  gender:
+    unmapped_severity: "LOW"
+    unmapped_default: "3"
+    values:
+      "M": "1"
+      "MALE": "1"
+      "F": "2"
+      "FEMALE": "2"
+      "": "3"
+      "NOT SPECIFIED": "3"
+      "PREFER NOT TO SAY": "3"
+
+  marital_status:
+    unmapped_severity: "LOW"
+    unmapped_default: null
+    values:
+      "SINGLE": "0"
+      "MARRIED": "1"
+      "WIDOWED": "2"
+      "DIVORCED": "3"
+      "SEPARATED": "4"
+      "CIVIL PARTNERSHIP": "5"
+
+  employment_status:
+    unmapped_severity: "HIGH"
+    unmapped_default: null
+    values:
+      "ACTIVE": "3"
+      "CURRENT": "3"
+      "LEAVER": "0"
+      "TERMINATED": "0"
+      "SUSPENDED": "1"
+      "ON LEAVE": "1"
+
+  action_type:
+    values:
+      "HIRE": "01"
+      "LEAVER": "10"
+
+  leaver_reason:
+    unmapped_severity: "LOW"
+    unmapped_default: null
+    values:
+      "RESIGNATION": "01"
+      "RESIGNED": "01"
+      "DISMISSAL": "02"
+      "REDUNDANCY": "03"
+      "RETIREMENT": "04"
+      "END OF CONTRACT": "05"
+      "DEATH IN SERVICE": "06"
+
+  title_to_form_of_address:
+    unmapped_severity: "LOW"
+    unmapped_default: null
+    values:
+      "MR": "1"
+      "MRS": "2"
+      "MS": "3"
+      "MISS": "4"
+      "DR": "5"
+      "PROF": "6"
+
+  contract_to_employee_group:
+    unmapped_severity: "HIGH"
+    unmapped_default: null
+    values:
+      "PERMANENT": "1"
+      "FIXED TERM": "1"
+      "TEMPORARY": "2"
+      "CONTRACTOR": "2"
+      "APPRENTICE": "1"
+
+  contract_to_employee_subgroup:
+    unmapped_severity: "HIGH"
+    unmapped_default: null
+    values:
+      "PERMANENT": "01"
+      "FIXED TERM": "02"
+      "TEMPORARY": "03"
+      "CONTRACTOR": "04"
+      "APPRENTICE": "05"
+
+  payment_method:
+    unmapped_severity: "CRITICAL"
+    unmapped_default: null
+    values:
+      "BACS": "U"
+      "BANK TRANSFER": "U"
+      "CHEQUE": "C"
+      "CASH": "B"
+
+  address_type_to_subtype:
+    unmapped_severity: "MEDIUM"
+    unmapped_default: "1"
+    values:
+      "HOME": "1"
+      "PERMANENT": "1"
+      "POSTAL": "2"
+      "TEMPORARY": "2"
+
+  country_to_iso:
+    unmapped_severity: "LOW"
+    unmapped_default: "GB"
+    values:
+      "UNITED KINGDOM": "GB"
+      "UK": "GB"
+      "ENGLAND": "GB"
+      "SCOTLAND": "GB"
+      "WALES": "GB"
+      "NORTHERN IRELAND": "GB"
+      "IRELAND": "IE"
+
+  nationality_to_iso:
+    unmapped_severity: "LOW"
+    unmapped_default: null
+    values:
+      "BRITISH": "GB"
+      "ENGLISH": "GB"
+      "SCOTTISH": "GB"
+      "WELSH": "GB"
+      "IRISH": "IE"
+      "POLISH": "PL"
+      "INDIAN": "IN"
+      "NIGERIAN": "NG"
+      "FRENCH": "FR"
+      "GERMAN": "DE"
+      "SPANISH": "ES"
+      "ITALIAN": "IT"
+      "ROMANIAN": "RO"
+      "PORTUGUESE": "PT"
+
+
+# =====================================================================
+# TRANSFORMATION FUNCTIONS
+# =====================================================================
+# Named routines referenced above. Implemented in
+# src/transform/transformations.py. Listed here so the specification
+# is complete without reading code.
+# =====================================================================
+
+transformations:
+
+  parse_uk_date:
+    description: "Parse a free-text date into a date object."
+    accepted_formats:
+      - "DD/MM/YYYY"
+      - "DD-MM-YYYY"
+      - "YYYY-MM-DD"
+      - "DD.MM.YYYY"
+      - "DD MMM YYYY"
+      - "DDMMYYYY"
+    ambiguity_rule: >
+      Where a date could be read as either DD/MM or MM/DD, UK order is
+      assumed. Dates where the day is 12 or lower are flagged as
+      ambiguous for review, since they cannot be verified.
+    on_failure: "Return null, raise HIGH defect"
+
+  normalise_ni_number:
+    description: "Normalise a National Insurance number."
+    steps:
+      - "Upper case"
+      - "Remove all whitespace and punctuation"
+    validation_pattern: "^[A-CEGHJ-PR-TW-Z]{2}[0-9]{6}[A-D]$"
+    on_failure: "Return null, raise CRITICAL defect"
+    notes: >
+      The pattern excludes prefixes D, F, I, Q, U and V, and the second
+      letter O, per HMRC specification.
+
+  normalise_uk_postcode:
+    description: "Normalise a UK postcode."
+    steps:
+      - "Upper case"
+      - "Strip all whitespace"
+      - "Insert a single space before the final three characters"
+    validation_pattern: "^[A-Z]{1,2}[0-9][A-Z0-9]? ?[0-9][A-Z]{2}$"
+    on_failure: "Return the trimmed original, raise HIGH defect"
+
+  normalise_sort_code:
+    description: "Normalise a UK bank sort code."
+    steps:
+      - "Strip hyphens, spaces and full stops"
+    validation_pattern: "^[0-9]{6}$"
+    on_failure: "Return null, raise CRITICAL defect"
+
+  normalise_account_number:
+    description: "Normalise a UK bank account number."
+    steps:
+      - "Strip all non-digits"
+      - "Left pad with zeros to 8 digits where 6 or 7 digits remain"
+    validation_pattern: "^[0-9]{8}$"
+    on_failure: "Return null, raise CRITICAL defect"
+    rationale: >
+      Leading zeros are routinely lost when extracts pass through
+      spreadsheets. Padding recovers them. Numbers shorter than 6
+      digits are too damaged to recover safely.
+
+  normalise_fte:
+    description: "Normalise full-time equivalent to a percentage."
+    accepted_inputs:
+      - "Decimal fraction, for example 1.0 or 0.5"
+      - "Percentage with symbol, for example 100% or 50%"
+      - "Whole number, for example 1"
+    output: "Numeric percentage between 0 exclusive and 100 inclusive"
+    on_failure: "Default to 100, raise MEDIUM defect"
+
+  trim:
+    description: "Remove leading and trailing whitespace, collapse internal runs to one space."
+
+  title_case:
+    description: "Capitalise the first letter of each word, preserving Mc, Mac and O' prefixes."
+
+
+# =====================================================================
+# DEFECT SEVERITY DEFINITIONS
+# =====================================================================
+
+defect_severity:
+  CRITICAL:
+    description: "Prevents payment or breaches statutory obligation."
+    action: "Record rejected. Must be resolved before go-live."
+    examples:
+      - "Invalid or missing NI number"
+      - "Invalid bank details"
+      - "Conflicting date of birth between sources"
+      - "Employee paid after their recorded leaving date"
+
+  HIGH:
+    description: "Record loads but is materially incorrect or incomplete."
+    action: "Loaded with defect raised. Resolution required before go-live."
+    examples:
+      - "Unparseable employment date"
+      - "Invalid postcode"
+      - "Unmapped employment status"
+
+  MEDIUM:
+    description: "Record loads with a documented assumption applied."
+    action: "Loaded. Reviewed as a batch, resolution optional."
+    examples:
+      - "Cost centre conflict resolved by survivorship"
+      - "Location not present in mapping table"
+      - "Account holder name differs from employee name"
+
+  LOW:
+    description: "Cosmetic or low-impact difference."
+    action: "Logged only. No action required."
+    examples:
+      - "Name formatting difference between sources"
+      - "Unmapped marital status"
+
+
+# =====================================================================
+# OPEN ISSUES
+# =====================================================================
+# Matters requiring business decision before sign-off. A specification
+# without open issues has not been examined closely enough.
+# =====================================================================
+
+open_issues:
+  - id: "OI-01"
+    title: "Historical organisational assignment is not migratable"
+    description: >
+      Neither source holds cost centre or department history. All
+      historical payroll cost in SAP will be attributed to the
+      employee's current cost centre.
+    impact: "Historical cost reporting in SAP will not match legacy reports."
+    owner: "Finance"
+    status: "OPEN"
+
+  - id: "OI-02"
+    title: "Salary history before the payment history window"
+    description: >
+      Employees hired before the payment history window receive a
+      back-dated record at the earliest observed salary, understating
+      their true historical pay.
+    impact: "Long service employees will show an inaccurate early salary."
+    owner: "HR"
+    status: "OPEN"
+
+  - id: "OI-03"
+    title: "Mid-month pay changes cannot be distinguished from unpaid leave"
+    description: >
+      Both produce a partial payment period. Rule PAY-03 treats them
+      identically and flags affected records for review.
+    impact: "Manual review required for all flagged records."
+    owner: "Payroll"
+    status: "OPEN"
+
+  - id: "OI-04"
+    title: "Manager reporting lines cannot be represented"
+    description: >
+      SAP represents reporting through position relationships. Positions
+      are not in scope, so the manager relationship held in HR.net has
+      no target.
+    impact: "Org chart reporting unavailable at go-live."
+    owner: "HR"
+    status: "OPEN"
+
+  - id: "OI-05"
+    title: "Building society roll numbers have no target field"
+    description: >
+      Field bkref on PA0009 is out of scope. Affected employees are
+      listed for manual entry post-migration.
+    impact: "Small number of employees require manual bank detail entry."
+    owner: "Payroll"
+    status: "OPEN"
