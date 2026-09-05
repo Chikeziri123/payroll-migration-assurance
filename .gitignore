@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+output/
+*.xlsx
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+.vscode/
+*.pbix
