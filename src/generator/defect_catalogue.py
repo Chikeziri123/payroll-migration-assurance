@@ -712,14 +712,14 @@ def corrupt_account_leading_zeros(rng: random.Random, clean: str) -> str:
 
 
 def corrupt_salary_format(rng: random.Random, clean: float) -> str:
-    style = rng.choice(["symbol", "comma", "both", "trailing_zeros"])
+    # "trailing_zeros" was removed: a value like 34500.0000 is still a
+    # plain number, so it is not a detectable formatting defect.
+    style = rng.choice(["symbol", "comma", "both"])
     if style == "symbol":
         return f"\u00a3{clean:.2f}"
     if style == "comma":
         return f"{clean:,.2f}"
-    if style == "both":
-        return f"\u00a3{clean:,.2f}"
-    return f"{clean:.4f}"
+    return f"\u00a3{clean:,.2f}"
 
 
 def corrupt_whitespace_case(rng: random.Random, clean: str) -> str:

@@ -1,0 +1,716 @@
+# =====================================================================
+# DATA QUALITY PROFILING RULES
+# UK Payroll Migration Assurance Framework
+# =====================================================================
+# Each rule declares what is checked, what counts as valid, and how
+# serious a failure is. The engine reads this file; the checks are not
+# written in code.
+#
+# WHY CONFIG RATHER THAN CODE
+# A data quality rule is a business statement, not a technical one.
+# "A National Insurance number must match the HMRC pattern" is
+# something a payroll manager can confirm or dispute. Buried in Python
+# it never gets reviewed, and unreviewed rules are how migrations
+# discover in UAT that they have been measuring the wrong thing.
+#
+# THE detects_defect FIELD
+# Every rule names the seeded defect code it is intended to catch.
+# That link is what allows the engine to score itself against ground
+# truth and report a detection rate per defect type, rather than
+# simply counting findings.
+#
+# RULE TYPES
+#   completeness       value must be present and non-blank
+#   uniqueness         value must not repeat within the table
+#   pattern            value must match a regular expression
+#   pattern_not        value must NOT match a regular expression
+#   domain             value must appear in an allowed list
+#   date_parseable     value must parse as a date in an accepted format
+#   date_range         parsed date must fall within bounds
+#   cross_field        comparison between two columns in the same table
+#   referential_set    value must exist in a named reference set
+#   referential_self   value must exist in the same table's key column
+#   orphan_child       every key in this table must have a row in another
+#   aggregate          group by a key, then assert a condition on the group
+#   custom             dispatches to a named Python function
+# =====================================================================
+
+metadata:
+  version: "1.0"
+  author: "Chikeziri Nnodum"
+  description: "Data quality profiling rules for HR.net and MiraclePay extracts"
+
+
+# =====================================================================
+# Shared patterns
+# =====================================================================
+# Defined once and referenced by name so the same definition of "valid"
+# cannot drift between rules.
+
+patterns:
+  # HMRC rules in full: the first letter excludes D, F, I, Q, U and V;
+  # the second additionally excludes O; and the pair may not form one of
+  # the reserved prefixes BG, GB, NK, KN, TN, NT or ZZ. A pattern that
+  # omits the reserved prefixes accepts values HMRC will reject.
+  ni_number_strict: '^(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z][0-9]{6}[A-D]$'
+  ni_number_loose: '^\s*[A-Za-z]{2}\s*[0-9]{2}\s*[0-9]{2}\s*[0-9]{2}\s*[A-Za-z]\s*$'
+  uk_postcode: '^[A-Z]{1,2}[0-9][A-Z0-9]? ?[0-9][A-Z]{2}$'
+  sort_code_clean: '^[0-9]{6}$'
+  sort_code_any: '^[0-9]{2}[-. ]?[0-9]{2}[-. ]?[0-9]{2}$'
+  account_number_clean: '^[0-9]{8}$'
+  numeric_clean: '^-?[0-9]+(\.[0-9]+)?$'
+  uk_tax_code: '^(S|C)?([0-9]{1,4}[LMNTWY]|BR|D0|D1|NT|0T|K[0-9]{1,4})( ?W1| ?M1| ?X)?$'
+  no_leading_trailing_space: '^\S(.*\S)?$'
+
+
+# =====================================================================
+# Reference sets
+# =====================================================================
+# Loaded from src/generator/reference_data.py at runtime, so the
+# profiler and the generator cannot disagree about what a valid cost
+# centre is.
+
+reference_sets:
+  cost_centres: "reference_data.valid_cost_centres"
+  org_units: "reference_data.valid_org_units"
+  job_keys: "reference_data.valid_job_keys"
+  location_codes: "reference_data.valid_location_codes"
+
+
+# =====================================================================
+# Accepted date formats
+# =====================================================================
+
+date_formats:
+  - "%Y-%m-%d"
+  - "%d/%m/%Y"
+  - "%d-%m-%Y"
+  - "%d.%m.%Y"
+  - "%d %b %Y"
+  - "%d %B %Y"
+  - "%d%m%Y"
+
+
+# =====================================================================
+# RULES: legacy.hrnet_employee
+# =====================================================================
+
+rules:
+
+  # -------------------------------------------------------------------
+  # HR.net employee: identity
+  # -------------------------------------------------------------------
+  - id: "HR-EMP-001"
+    table: "legacy.hrnet_employee"
+    column: "emp_id"
+    type: "completeness"
+    severity: "CRITICAL"
+    description: "Employee ID must be present"
+    detects_defect: null
+
+  - id: "HR-EMP-002"
+    table: "legacy.hrnet_employee"
+    column: "emp_id"
+    type: "uniqueness"
+    severity: "CRITICAL"
+    description: "Employee ID must be unique within the extract"
+    detects_defect: null
+
+  - id: "HR-EMP-003"
+    table: "legacy.hrnet_employee"
+    column: "ni_number"
+    type: "completeness"
+    severity: "CRITICAL"
+    description: "National Insurance number must be present"
+    detects_defect: "NI-03"
+
+  - id: "HR-EMP-004"
+    table: "legacy.hrnet_employee"
+    column: "ni_number"
+    type: "uniqueness"
+    severity: "CRITICAL"
+    description: >
+      National Insurance number must be unique. A duplicate indicates
+      either a keying error or a genuinely duplicated person record.
+    ignore_blank: true
+    detects_defect: "MT-03"
+
+  - id: "HR-EMP-005"
+    table: "legacy.hrnet_employee"
+    column: "last_name"
+    type: "completeness"
+    severity: "CRITICAL"
+    description: "Surname must be present"
+    detects_defect: null
+
+  - id: "HR-EMP-006"
+    table: "legacy.hrnet_employee"
+    column: "last_name"
+    type: "custom"
+    function: "check_text_hygiene"
+    severity: "LOW"
+    description: >
+      Surname must be free of leading, trailing or doubled whitespace,
+      and must not be wholly upper or wholly lower case. Case
+      uniformity is a weaker signal than whitespace, since some
+      surnames are legitimately short or capitalised, but in
+      combination the two catch most entry inconsistency.
+    detects_defect: "FM-07"
+
+  - id: "HR-EMP-007"
+    table: "legacy.hrnet_employee"
+    column: "first_name"
+    type: "completeness"
+    severity: "CRITICAL"
+    description: "Forename must be present"
+    detects_defect: null
+
+  # -------------------------------------------------------------------
+  # HR.net employee: dates
+  # -------------------------------------------------------------------
+  - id: "HR-EMP-010"
+    table: "legacy.hrnet_employee"
+    column: "hire_date"
+    type: "completeness"
+    severity: "CRITICAL"
+    description: "Hire date must be present"
+    detects_defect: null
+
+  - id: "HR-EMP-011"
+    table: "legacy.hrnet_employee"
+    column: "hire_date"
+    type: "date_parseable"
+    severity: "HIGH"
+    description: >
+      Hire date must parse as a date in one of the accepted formats.
+      An unparseable hire date blocks construction of the PA0000 hire
+      action, which every other infotype depends on.
+    detects_defect: "DT-01"
+
+  - id: "HR-EMP-012"
+    table: "legacy.hrnet_employee"
+    column: "hire_date"
+    type: "custom"
+    function: "check_date_ambiguity"
+    severity: "MEDIUM"
+    description: >
+      Hire date held in a format where day and month could be
+      transposed, and where the day is 12 or lower so the ambiguity
+      cannot be resolved from the value itself.
+    detects_defect: "DT-02"
+
+  - id: "HR-EMP-013"
+    table: "legacy.hrnet_employee"
+    column: "date_of_birth"
+    type: "custom"
+    function: "check_age_plausibility"
+    min_age_at_hire: 15
+    max_age_at_hire: 75
+    severity: "HIGH"
+    description: >
+      Date of birth must imply a plausible age at hire, between 15 and
+      75. An absolute date range is insufficient: a date of birth in
+      1935 is unremarkable in isolation but implies a 90 year old
+      recruit if the hire date is recent.
+    detects_defect: "DT-04"
+
+  - id: "HR-EMP-014"
+    table: "legacy.hrnet_employee"
+    column: "leaver_date"
+    type: "cross_field"
+    other_column: "hire_date"
+    operator: "ge"
+    both_must_parse: true
+    ignore_blank: true
+    severity: "HIGH"
+    description: >
+      Leaver date must be on or after hire date. A leaver date before
+      hire is logically impossible.
+    detects_defect: "DT-03"
+
+  # -------------------------------------------------------------------
+  # HR.net employee: coding and organisation
+  # -------------------------------------------------------------------
+  - id: "HR-EMP-020"
+    table: "legacy.hrnet_employee"
+    column: "gender"
+    type: "domain"
+    allowed: ["M", "F"]
+    case_sensitive: true
+    severity: "LOW"
+    description: >
+      Gender is expected as a single upper case M or F. Any other value
+      is inconsistent coding accumulated across generations of data
+      entry, and is recoverable by mapping.
+    detects_defect: "FM-02"
+
+  - id: "HR-EMP-021"
+    table: "legacy.hrnet_employee"
+    column: "fte"
+    type: "custom"
+    function: "check_fte_format"
+    severity: "MEDIUM"
+    description: >
+      Full-time equivalent must be a plain decimal between 0 and 1.5.
+      A pattern check alone is insufficient, because '100' and '50'
+      are numerically clean but mean 100 and 50 FTE, which is absurd.
+      The check must therefore test range as well as format.
+    detects_defect: "FM-03"
+
+  - id: "HR-EMP-022"
+    table: "legacy.hrnet_employee"
+    column: "cost_centre"
+    type: "referential_set"
+    reference_set: "cost_centres"
+    severity: "HIGH"
+    description: >
+      Cost centre must exist in the finance reference data. An unknown
+      code cannot be posted to and will fail the SAP load.
+    detects_defect: "RF-01"
+
+  - id: "HR-EMP-023"
+    table: "legacy.hrnet_employee"
+    column: "manager_emp_id"
+    type: "referential_self"
+    key_column: "emp_id"
+    ignore_blank: true
+    severity: "MEDIUM"
+    description: >
+      Manager employee ID must exist in the extract. An orphaned
+      reference usually means the manager left and was archived.
+    detects_defect: "RF-02"
+
+  - id: "HR-EMP-024"
+    table: "legacy.hrnet_employee"
+    column: "employment_status"
+    type: "domain"
+    allowed: ["Active", "Leaver", "Suspended", "On Leave", "Current", "Terminated"]
+    case_sensitive: false
+    severity: "HIGH"
+    description: "Employment status must map to a known SAP status"
+    detects_defect: null
+
+
+# =====================================================================
+# RULES: legacy.hrnet_address
+# =====================================================================
+
+  - id: "HR-ADR-001"
+    table: "legacy.hrnet_address"
+    column: "postcode"
+    type: "pattern"
+    pattern: "uk_postcode"
+    uppercase_first: true
+    severity: "HIGH"
+    description: >
+      Postcode must match the UK pattern. An invalid postcode blocks
+      issue of payslips and statutory correspondence.
+    detects_defect: "FM-01"
+
+  - id: "HR-ADR-002"
+    table: "legacy.hrnet_address"
+    column: "address_line_1"
+    type: "completeness"
+    severity: "HIGH"
+    description: "First line of address must be present"
+    detects_defect: null
+
+  - id: "HR-ADR-003"
+    table: "legacy.hrnet_address"
+    column: "city"
+    type: "completeness"
+    severity: "MEDIUM"
+    description: "City must be present"
+    detects_defect: null
+
+  - id: "HR-ADR-004"
+    table: "legacy.hrnet_address"
+    column: "emp_id"
+    type: "aggregate"
+    group_by: "emp_id"
+    condition: "exactly_one_where"
+    where_column: "is_primary"
+    where_values: ["Y", "YES", "1", "y", "yes"]
+    severity: "MEDIUM"
+    description: >
+      Each employee must have exactly one primary address. None flagged
+      means no address can be selected; several flagged means the
+      migration would have to guess.
+    detects_defect: "FM-05"
+
+  - id: "HR-ADR-005"
+    table: "legacy.hrnet_address"
+    column: "emp_id"
+    type: "orphan_child"
+    parent_table: "legacy.hrnet_employee"
+    parent_column: "emp_id"
+    direction: "parent_without_child"
+    severity: "HIGH"
+    description: >
+      Every employee must have at least one address record. An employee
+      with none cannot be issued a payslip.
+    detects_defect: "FM-04"
+
+
+# =====================================================================
+# RULES: legacy.miraclepay_employee
+# =====================================================================
+
+  - id: "MP-EMP-001"
+    table: "legacy.miraclepay_employee"
+    column: "payroll_ref"
+    type: "completeness"
+    severity: "CRITICAL"
+    description: "Payroll reference must be present"
+    detects_defect: null
+
+  - id: "MP-EMP-002"
+    table: "legacy.miraclepay_employee"
+    column: "payroll_ref"
+    type: "uniqueness"
+    severity: "CRITICAL"
+    description: "Payroll reference must be unique"
+    detects_defect: null
+
+  - id: "MP-EMP-003"
+    table: "legacy.miraclepay_employee"
+    column: "ni_number"
+    type: "completeness"
+    severity: "CRITICAL"
+    description: >
+      National Insurance number must be present. Without it the
+      employee cannot be reported to HMRC.
+    detects_defect: "NI-03"
+
+  - id: "MP-EMP-004"
+    table: "legacy.miraclepay_employee"
+    column: "ni_number"
+    type: "pattern"
+    pattern: "ni_number_strict"
+    uppercase_first: true
+    strip_spaces_first: true
+    ignore_blank: true
+    severity: "CRITICAL"
+    description: >
+      National Insurance number must match the HMRC format after
+      normalisation. The pattern excludes prefixes D, F, I, Q, U and V,
+      the second letter O, and the reserved combinations.
+    detects_defect: "NI-01"
+
+  - id: "MP-EMP-005"
+    table: "legacy.miraclepay_employee"
+    column: "ni_number"
+    type: "uniqueness"
+    ignore_blank: true
+    severity: "CRITICAL"
+    description: >
+      National Insurance number must be unique within payroll. A
+      duplicate means two people share an identifier, which corrupts
+      any match to HR.
+    detects_defect: "NI-02"
+
+  - id: "MP-EMP-006"
+    table: "legacy.miraclepay_employee"
+    column: "ni_number"
+    type: "custom"
+    function: "check_ni_formatting"
+    severity: "LOW"
+    description: >
+      National Insurance number valid in content but stored with
+      inconsistent spacing or case. Recoverable by normalisation, but
+      it defeats an exact join between systems if left alone.
+    detects_defect: "NI-04"
+
+  - id: "MP-EMP-010"
+    table: "legacy.miraclepay_employee"
+    column: "annual_salary"
+    type: "pattern"
+    pattern: "numeric_clean"
+    severity: "LOW"
+    description: >
+      Annual salary is expected as a plain number. Currency symbols and
+      thousands separators are recoverable but must be identified.
+    detects_defect: "FM-06"
+
+  - id: "MP-EMP-011"
+    table: "legacy.miraclepay_employee"
+    column: "annual_salary"
+    type: "custom"
+    function: "check_national_minimum_wage"
+    severity: "CRITICAL"
+    description: >
+      Annualised pay must be at or above the National Minimum Wage for
+      the stated working capacity. Below it is a statutory breach.
+    detects_defect: "PR-02"
+
+  - id: "MP-EMP-012"
+    table: "legacy.miraclepay_employee"
+    column: "tax_code"
+    type: "pattern"
+    pattern: "uk_tax_code"
+    uppercase_first: true
+    ignore_blank: true
+    severity: "HIGH"
+    description: >
+      Tax code must match a recognised HMRC pattern. An unrecognised
+      code cannot be submitted through Real Time Information.
+    detects_defect: "PR-04"
+
+  - id: "MP-EMP-013"
+    table: "legacy.miraclepay_employee"
+    column: "dob"
+    type: "date_parseable"
+    ignore_blank: true
+    severity: "HIGH"
+    description: "Date of birth must parse as a date"
+    detects_defect: null
+
+  - id: "MP-EMP-014"
+    table: "legacy.miraclepay_employee"
+    column: "termination_date"
+    type: "cross_field"
+    other_column: "start_date"
+    operator: "ge"
+    both_must_parse: true
+    ignore_blank: true
+    severity: "HIGH"
+    description: "Termination date must be on or after start date"
+    detects_defect: null
+
+
+# =====================================================================
+# RULES: legacy.miraclepay_bank
+# =====================================================================
+
+  - id: "MP-BNK-001"
+    table: "legacy.miraclepay_bank"
+    column: "sort_code"
+    type: "pattern"
+    pattern: "sort_code_clean"
+    severity: "LOW"
+    description: >
+      Sort code is expected as six plain digits. Hyphens, spaces and
+      full stops are recoverable by normalisation.
+    detects_defect: "BK-02"
+
+  - id: "MP-BNK-002"
+    table: "legacy.miraclepay_bank"
+    column: "sort_code"
+    type: "pattern"
+    pattern: "sort_code_any"
+    severity: "CRITICAL"
+    description: >
+      Sort code must reduce to six digits after separators are removed.
+      Anything else cannot be paid and is not recoverable.
+    detects_defect: "BK-03"
+
+  - id: "MP-BNK-003"
+    table: "legacy.miraclepay_bank"
+    column: "account_number"
+    type: "pattern"
+    pattern: "account_number_clean"
+    severity: "CRITICAL"
+    description: >
+      Account number must be exactly eight digits. Six and seven digit
+      values indicate leading zeros lost in extraction and are
+      recoverable by padding; anything else is not.
+    detects_defect: "BK-01"
+
+  - id: "MP-BNK-004"
+    table: "legacy.miraclepay_bank"
+    column: "payroll_ref"
+    type: "aggregate"
+    group_by: "payroll_ref"
+    condition: "at_most_one_where"
+    where_column: "is_active"
+    where_values: ["Y", "YES", "1", "y", "yes"]
+    severity: "CRITICAL"
+    description: >
+      An employee must have at most one active bank account. Where
+      several are active the migration cannot determine which account
+      to pay, and guessing is not acceptable.
+    detects_defect: "BK-04"
+
+  - id: "MP-BNK-005"
+    table: "legacy.miraclepay_bank"
+    column: "account_holder"
+    type: "completeness"
+    severity: "HIGH"
+    description: "Account holder name must be present"
+    detects_defect: null
+
+
+# =====================================================================
+# RULES: cross-system
+# =====================================================================
+# The defining checks of a two-source migration. These compare the same
+# employee as each system sees them.
+
+  - id: "XS-001"
+    type: "custom"
+    function: "check_match_rate"
+    table: "cross_system"
+    column: "ni_number"
+    severity: "HIGH"
+    description: >
+      Employees must match between HR.net and MiraclePay on normalised
+      National Insurance number. An unmatched record is either a person
+      who will not be paid or a duplicate created in the target.
+    detects_defect: "MT-01"
+
+  - id: "XS-002"
+    type: "custom"
+    function: "check_cross_system_conflict"
+    table: "cross_system"
+    column: "cost_centre"
+    hr_column: "cost_centre"
+    pay_column: "cost_centre"
+    severity: "MEDIUM"
+    description: >
+      Cost centre must agree between HR and payroll. Where it does not,
+      survivorship applies and the conflict is logged.
+    detects_defect: "XS-01"
+
+  - id: "XS-003"
+    type: "custom"
+    function: "check_cross_system_conflict"
+    table: "cross_system"
+    column: "surname"
+    hr_column: "last_name"
+    pay_column: "surname"
+    normalise: true
+    severity: "LOW"
+    description: >
+      Surname must agree between HR and payroll. Where it does not, HR
+      survives as the system of record for identity.
+    detects_defect: "XS-02"
+
+  - id: "XS-004"
+    type: "custom"
+    function: "check_cross_system_conflict"
+    table: "cross_system"
+    column: "date_of_birth"
+    hr_column: "date_of_birth"
+    pay_column: "dob"
+    as_date: true
+    severity: "CRITICAL"
+    description: >
+      Date of birth must agree between HR and payroll. No automatic
+      survivorship applies, because the field drives National Insurance
+      category and pension auto-enrolment.
+    detects_defect: "XS-03"
+
+
+  - id: "XS-005"
+    type: "custom"
+    function: "check_cross_system_conflict"
+    table: "cross_system"
+    column: "employment_start"
+    hr_column: "hire_date"
+    pay_column: "start_date"
+    as_date: true
+    tolerance_days: 14
+    severity: "LOW"
+    description: >
+      Employment start date must agree between HR and payroll within a
+      normal payroll cut-off tolerance of fourteen days. A larger
+      difference indicates a genuine disagreement about when employment
+      began.
+    detects_defect: "XS-04"
+
+  - id: "XS-006"
+    type: "custom"
+    function: "check_orphan_payroll"
+    table: "cross_system"
+    column: "payroll_ref"
+    severity: "CRITICAL"
+    description: >
+      Every payroll record must have a corresponding HR record. Someone
+      being paid with no employment record is a control concern rather
+      than a data quality issue.
+    detects_defect: "MT-02"
+
+  - id: "XS-007"
+    type: "custom"
+    function: "check_account_holder_match"
+    table: "cross_system"
+    column: "account_holder"
+    severity: "MEDIUM"
+    description: >
+      Account holder name should match the employee name. A mismatch is
+      often legitimate, such as a joint account, but requires
+      confirmation before payment.
+    detects_defect: "BK-05"
+
+
+# =====================================================================
+# RULES: payment history
+# =====================================================================
+
+  - id: "MP-PAY-001"
+    type: "custom"
+    function: "check_paid_after_leaving"
+    table: "legacy.miraclepay_payment_history"
+    column: "pay_period"
+    severity: "CRITICAL"
+    description: >
+      No payments may be recorded in periods after the employee's
+      leaving date. Payment after leaving is a control failure rather
+      than a data quality issue.
+    detects_defect: "PR-01"
+
+  - id: "MP-PAY-002"
+    type: "custom"
+    function: "check_payment_gaps"
+    table: "legacy.miraclepay_payment_history"
+    column: "pay_period"
+    severity: "MEDIUM"
+    description: >
+      Payment history must be continuous within a period of employment.
+      A gap may be unpaid leave or may be a lost extract row, and the
+      two cannot be distinguished from the data alone.
+    detects_defect: "PR-03"
+
+  - id: "MP-PAY-003"
+    table: "legacy.miraclepay_payment_history"
+    column: "gross_pay"
+    type: "pattern"
+    pattern: "numeric_clean"
+    severity: "HIGH"
+    description: "Gross pay must be numeric"
+    detects_defect: null
+
+
+# =====================================================================
+# SCORING
+# =====================================================================
+# How a table's quality score is calculated from its rule results.
+#
+# Weighting by severity means a single critical failure moves the score
+# more than a hundred cosmetic ones, which is the correct behaviour: a
+# table with one invalid bank account is not in better shape than a
+# table with a hundred inconsistent capitalisations.
+
+scoring:
+  severity_weights:
+    CRITICAL: 10
+    HIGH: 5
+    MEDIUM: 2
+    LOW: 1
+
+  thresholds:
+    - grade: "A"
+      min_score: 98.0
+      description: "Ready for migration"
+    - grade: "B"
+      min_score: 93.0
+      description: "Minor remediation required"
+    - grade: "C"
+      min_score: 85.0
+      description: "Significant remediation required"
+    - grade: "D"
+      min_score: 70.0
+      description: "Major remediation required before any load"
+    - grade: "F"
+      min_score: 0.0
+      description: "Not fit for migration"

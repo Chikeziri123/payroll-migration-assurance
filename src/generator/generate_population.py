@@ -602,6 +602,15 @@ def apply_record_level_defects(
 # CSV writers
 # =====================================================================
 
+
+def to_float_or_none(v):
+    """Return a float if the string is a plain number, else None."""
+    try:
+        return float(str(v))
+    except (TypeError, ValueError):
+        return None
+
+
 def _d(d: date | None) -> str:
     return d.isoformat() if d else ""
 
@@ -691,22 +700,28 @@ def write_hrnet_employee(
         gender = p.gender
         if eid in d_gender:
             var = dc.gender_variant(rng, p.gender)
-            gt.record("FM-02", "hrnet_employee", eid, "gender", p.gender, var)
-            gender = var
+            # Only a genuine change counts. A "variant" identical to the
+            # clean value is not a defect, and recording it as one would
+            # make any detection rate measured against this log wrong.
+            if var != p.gender:
+                gt.record("FM-02", "hrnet_employee", eid, "gender", p.gender, var)
+                gender = var
 
         # FTE format
         fte = str(p.fte)
         if eid in d_fte:
             var = dc.fte_variant(rng, p.fte)
-            gt.record("FM-03", "hrnet_employee", eid, "fte", fte, var)
-            fte = var
+            if var != fte:
+                gt.record("FM-03", "hrnet_employee", eid, "fte", fte, var)
+                fte = var
 
         # Whitespace and case
         last_name = p.last_name
         if eid in d_ws:
             var = dc.corrupt_whitespace_case(rng, p.last_name)
-            gt.record("FM-07", "hrnet_employee", eid, "last_name", p.last_name, var)
-            last_name = var
+            if var != p.last_name:
+                gt.record("FM-07", "hrnet_employee", eid, "last_name", p.last_name, var)
+                last_name = var
 
         rows.append({
             "emp_id": eid,
@@ -792,7 +807,8 @@ def write_hrnet_address(
         # Second address for some, which is where the primary flag
         # ambiguity becomes a real problem.
         if eid in d_primary or rng.random() < 0.11:
-            second_primary = "Y" if (eid in d_primary and primary_flag == "Y") else "N"
+            second_primary = "Y" if (eid in d_primary
+                                     and primary_flag.strip().upper() in ("Y", "YES", "1")) else "N"
             rows.append({
                 "emp_id": eid,
                 "address_type": rng.choice(["POSTAL", "TEMPORARY"]),
@@ -896,8 +912,11 @@ def write_miraclepay_employee(
         salary_str = f"{salary_val:.2f}"
         if ref in d_salary_fmt:
             var = dc.corrupt_salary_format(rng, salary_val)
-            gt.record("FM-06", "miraclepay_employee", ref, "annual_salary", salary_str, var)
-            salary_str = var
+            # Trailing-zero variants are still numerically clean, so they
+            # are not a detectable defect and are not recorded as one.
+            if var != salary_str and to_float_or_none(var) is None:
+                gt.record("FM-06", "miraclepay_employee", ref, "annual_salary", salary_str, var)
+                salary_str = var
 
         tax_code = p.tax_code
         if ref in d_taxcode:
