@@ -1,0 +1,29 @@
+payrollmig:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+
+      # Nested env_var calls so this works whether your .env uses the
+      # libpq names (PGHOST, PGUSER) or the more common DB_ prefixed
+      # names. First name wins, second is the fallback, third value is
+      # the literal default. If your .env uses something else entirely,
+      # tell me the key names and I will swap these.
+      host: "{{ env_var('PGHOST', env_var('DB_HOST', 'localhost')) }}"
+      port: "{{ env_var('PGPORT', env_var('DB_PORT', '5432')) | int }}"
+      user: "{{ env_var('PGUSER', env_var('DB_USER', 'postgres')) }}"
+      password: "{{ env_var('PGPASSWORD', env_var('DB_PASSWORD', '')) }}"
+      dbname: "{{ env_var('PGDATABASE', env_var('DB_NAME', 'payrollmig')) }}"
+
+      # Models land directly in a schema called recon.
+      #
+      # Worth knowing: dbt's default generate_schema_name macro APPENDS a
+      # custom schema to the target schema, so setting +schema: recon in
+      # dbt_project.yml on top of a target schema of public would give you
+      # public_recon, not recon. Setting the target schema here and using
+      # no custom schema at all avoids needing a macro override.
+      schema: recon
+
+      threads: 4
+      keepalives_idle: 0
+      connect_timeout: 10

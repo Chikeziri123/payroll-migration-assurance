@@ -219,8 +219,20 @@ def infer_salary_segments(
     # leaving, so the sequence tiles continuously.
     final_end = day_before(leave) if leave else HIGH_DATE
     if final_end < cur_start:
-        final_end = cur_start
-    segments.append(Segment(cur_start, final_end, cur_val, cur_method))
+        # The last detected change begins on or after the leaving date,
+        # so it is not a salary period the employee ever served. Drop it
+        # and extend the preceding segment to the end of employment.
+        # Clamping the end forward, as the previous version did, produced
+        # a segment that outlived the employment containing it.
+        while segments and segments[-1].begda > final_end:
+            segments.pop()
+        if segments:
+            last = segments[-1]
+            segments[-1] = Segment(last.begda, final_end, last.ansal, last.method)
+        else:
+            segments.append(Segment(cur_start, cur_start, cur_val, cur_method))
+    else:
+        segments.append(Segment(cur_start, final_end, cur_val, cur_method))
 
     # Merge any adjacent segments that ended up with equal salary, which
     # can happen after a blend resolution.
@@ -384,9 +396,15 @@ def main() -> None:
                 hire = row.hire_date
                 if hire is None:
                     skipped += 1
-                    rejects.append(("SAP_TARGET", pernr, None,
-                                    "No hire date; cannot construct any infotype",
-                                    "CRITICAL", None))
+                    # One reject per infotype rather than one for the
+                    # person. Every infotype BEGDA derives from the hire
+                    # date, so all six genuinely fail, and a reconciliation
+                    # that balances per infotype needs to see them that way.
+                    for it in ("0000", "0001", "0002", "0006", "0008", "0009"):
+                        rejects.append(("SAP_TARGET", pernr, it,
+                                        "No parseable hire date; every infotype "
+                                        "BEGDA derives from it",
+                                        "CRITICAL", None))
                     continue
                 leave = row.leaver_date
                 emp_end = day_before(leave) if leave else HIGH_DATE
@@ -446,6 +464,15 @@ def main() -> None:
                           (row.county or "")[:40] or None,
                           row.postcode[:10], "GB")],
                         pernr, "0006", rejects)
+                else:
+                    missing = [f for f, v in (("address line 1", row.address_line_1),
+                                              ("city", row.city),
+                                              ("postcode", row.postcode))
+                               if not v]
+                    rejects.append(("SAP_TARGET", pernr, "0006",
+                                    f"Address incomplete, PA0006 not created. "
+                                    f"Missing: {', '.join(missing)}",
+                                    "HIGH", None))
 
                 # ---- PA0009 bank details ---------------------------
                 if row.sort_code and row.account_number:

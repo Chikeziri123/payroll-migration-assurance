@@ -1,0 +1,81 @@
+version: 2
+
+models:
+
+  - name: int_person_spine
+    description: >
+      One row per migrated person with per infotype eligibility. Eligibility
+      is derived from surviving data rather than assumed, so that a record
+      which correctly does not exist is never counted as a gap.
+    columns:
+      - name: pernr
+        description: SAP personnel number, trimmed to text for joining.
+        data_tests:
+          - unique
+          - not_null
+
+  - name: int_rejects_resolved
+    description: >
+      Every reject classified as BLOCKING or ADVISORY and resolved back to a
+      PERNR. The classification is driven by whether the row names an
+      infotype, not by severity, because 39 CRITICAL rows are person level
+      observations that excluded nothing.
+    columns:
+      - name: reject_id
+        data_tests:
+          - unique
+          - not_null
+      - name: reject_class
+        data_tests:
+          - accepted_values:
+              values: ['BLOCKING', 'ADVISORY']
+
+  - name: recon_completeness_matrix
+    description: >
+      One row per person per infotype with the reconciliation state. Every
+      other reconciliation model derives from this one so that summary and
+      detail cannot disagree.
+    columns:
+      - name: pernr
+        data_tests:
+          - not_null
+      - name: infotype
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['0000', '0001', '0002', '0006', '0008', '0009']
+      - name: recon_state
+        data_tests:
+          - not_null
+          - accepted_values:
+              values:
+                - LOADED
+                - CORRECTLY_ABSENT
+                - EXPLAINED_ABSENT
+                - UNEXPLAINED_ABSENT
+                - REJECTED_BUT_PRESENT
+                - NOT_ELIGIBLE_BUT_PRESENT
+
+  - name: recon_record_counts
+    description: >
+      Source to target counts by infotype with a PASS or FAIL status. This
+      is the programme board view and the columns add up to the population
+      by construction.
+    columns:
+      - name: infotype
+        data_tests:
+          - unique
+          - not_null
+      - name: status
+        data_tests:
+          - accepted_values:
+              values: ['PASS', 'FAIL']
+
+  - name: recon_exceptions
+    description: >
+      Every person and infotype that did not reconcile cleanly, ranked for
+      triage. In a healthy migration every row here is EXPLAINED_ABSENT.
+    columns:
+      - name: pernr
+        data_tests:
+          - not_null

@@ -1,0 +1,82 @@
+version: 2
+
+# Sources for the reconciliation layer.
+#
+# Note what is absent: ground_truth is not declared here and will not be.
+# Reconciliation has to prove itself using only evidence a real migration
+# would have. The answer keys in seeded_defects and salary_history are for
+# scoring harnesses only. If they are reachable from this project, sooner
+# or later a model reads them and the reconciliation stops meaning
+# anything.
+
+sources:
+
+  - name: legacy
+    schema: legacy
+    description: >
+      Raw source extracts from the two legacy systems. Every column is TEXT
+      on purpose so that defects survive into the landing layer rather than
+      being rejected at load time.
+    tables:
+      - name: hrnet_employee
+        description: HR system employee master, 2296 rows at DR1.
+      - name: hrnet_address
+        description: HR system addresses, 2552 rows at DR1.
+      - name: miraclepay_employee
+        description: Payroll system employee master, 2259 rows at DR1.
+      - name: miraclepay_bank
+        description: Payroll system bank details, 2293 rows at DR1.
+      - name: miraclepay_payment_history
+        description: >
+          Payroll payment lines, 80884 rows at DR1. Covers a 4 year window
+          against careers of up to 35 years, which is why 62 percent of true
+          salary change events are not evidenced in this data.
+      - name: extract_control
+        description: Load audit rows, one per extract file.
+
+  - name: staging
+    schema: staging
+    tables:
+      - name: golden_employee
+        description: >
+          The resolved record. One row per person, 2334 at DR1, carrying the
+          surviving value for every field after matching, cleansing and
+          survivorship. This is the source population for every infotype.
+
+  - name: sap_target
+    schema: sap_target
+    tables:
+      - name: pa0000
+        description: Actions. More rows than employees because leavers carry a second action.
+      - name: pa0001
+        description: >
+          Organisational assignment. One record per employee from hire to high
+          date. Historical org assignment is not migratable because neither
+          source holds cost centre history. Open issue OI-01.
+      - name: pa0002
+        description: Personal data.
+      - name: pa0006
+        description: Addresses.
+      - name: pa0008
+        description: Basic pay. Multiple validity segments per employee, inferred from payment history.
+      - name: pa0009
+        description: Bank details.
+      - name: migration_audit
+        description: Every survivorship and cleansing change applied, 1822 rows at DR1.
+      - name: migration_rejects
+        description: >
+          Records that did not load, with severity and reason. The
+          reconciliation depends on this being complete: any source record
+          that is neither in a target table nor in here is an unexplained
+          loss, which is the single worst outcome in a migration.
+      - name: key_map
+        description: Legacy identifiers to PERNR, 2334 rows at DR1.
+
+  - name: profiling
+    schema: profiling
+    description: Data quality rule engine output, keyed by run_id.
+    tables:
+      - name: rule_results
+      - name: rule_failures
+      - name: table_scores
+      - name: detection_scores
