@@ -9,7 +9,7 @@ The point is not a dashboard. It is an assurance framework that can prove things
 | Claim | Measured value |
 |---|---|
 | Defect detection | 48 rules find 94.5% of 2,650 seeded defects, 30 of 33 defect types at 100% |
-| Salary inference accuracy | 0.022% day-weighted error on a £43,504 mean salary, £9.44 per person-day |
+| Salary inference accuracy | 0.022% day-weighted error on a £43,512 mean salary, £9.46 per person-day |
 | Amount accuracy | 94.1% of inferred salaries within £1, 99.9% within 0.5% |
 | Reconciliation | 23 dbt tests, all passing, source to target fully accounted for |
 
