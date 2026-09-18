@@ -15,6 +15,16 @@ The point is not a dashboard. It is an assurance framework that can prove things
 
 Every figure comes from running the code, not from an estimate.
 
+## Migration control dashboard
+
+![Migration control dashboard](docs/dashboard-control.png)
+
+Programme-level readiness at a glance: source row counts, defect detection rate, unexplained record loss, and per-infotype pass status against the reconciliation controls.
+
+![Exception triage](docs/dashboard-exceptions.png)
+
+Every non-clean record, ranked by triage priority and filterable by reconciliation state, match method, reject severity and infotype. Fifty-six exceptions, all of them explained, none unexplained.
+
 ## Two things stated openly
 
 **Target is SAP-shaped, not SAP.** Real SAP table and field names (pa0000, pernr, begda, endda) implemented in PostgreSQL, because SAP has no free tier. The structures, validity period semantics and infotype relationships are real. The system is not.
