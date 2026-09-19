@@ -3,8 +3,9 @@ __pycache__/
 .env
 .env.*
 !.env.example
-output/
+output/*
 *.xlsx
+!output/reconciliation-evidence-pack.xlsx
 dbt/target/
 dbt/logs/
 dbt/dbt_packages/
